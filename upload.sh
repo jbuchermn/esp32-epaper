@@ -5,7 +5,7 @@ PORT=${1:-/dev/ttyUSB0}  # Default to /dev/ttyUSB0, or use first argument
 BAUD=${2:-115200}        # Default baud rate
 
 # Python files to upload
-FILES=("code.py" "fronius_api.py" "data_manager.py")
+FILES=("code.py" "fronius_api.py" "network.py")
 
 echo "=== CircuitPython Upload Script ==="
 echo "Port: $PORT"

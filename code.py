@@ -10,12 +10,11 @@ import time
 from adafruit_display_text import label
 from adafruit_ssd1680 import SSD1680
 
+from network import ntp
 from fronius_api import FroniusAPI
-from data_manager import DataManager
 
 # Configuration
 INVERTER_IP = "192.168.99.240"
-DATA_COLLECTION_INTERVAL = 15
 
 # Display pins for Waveshare 2.13inch e-ink (SD1680)
 SPI_CLK = board.IO13
@@ -26,9 +25,7 @@ RST = board.IO26
 BUSY = board.IO25
 
 class EPaperDisplay:
-    def __init__(self, ntp):
-        self._ntp = ntp
-
+    def __init__(self):
         # Release any existing displays
         displayio.release_displays()
 
@@ -80,23 +77,13 @@ class EPaperDisplay:
 
         self.display.refresh()
 
-    def update(self, data_manager):
+    def update(self, fronius_api):
         """Display power data on e-ink screen"""
 
-        if  self.display.time_to_refresh > 0.5:
-            return
-        else:
-            time.sleep(self.display.time_to_refresh + 0.01)
+        print(f"Waiting for display update: {self.display.time_to_refresh}s...")
+        time.sleep(self.display.time_to_refresh + 0.1)
         print("Updating display...")
 
-        # Get 3-minute averages
-        averages = data_manager.get_averages(180)  # 3 minutes
-
-        # Calculate self-sufficiency for last 24 hours
-        self_sufficiency = data_manager.calculate_self_sufficiency(24 * 60 * 60)
-
-        # Get load history for chart
-        load_history = data_manager.get_load_history(24 * 60 * 60)
 
         # Clear display group
         self.splash = displayio.Group()
@@ -109,116 +96,50 @@ class EPaperDisplay:
         bg_sprite = displayio.TileGrid(color_bitmap, pixel_shader=color_palette)
         self.splash.append(bg_sprite)
 
+
         # Add text labels
-        y_position = 5
-        line_height = 14
+        x_position = 10
+        y_position = 10
+        line_height_1 = 14
+        line_height_2 = 24
 
-        # Power values
-        self._add_text(f"PV:          {(averages['pv_power']/1000.0):6.3f} kW", 5, y_position)
-        y_position += line_height
+        data = fronius_api.get_current_data()
+        data['P_Load'] = (data['P_Grid'] + data['P_Akku'] + data['P_PV'])
 
-        self._add_text(f"Last:        {(averages['load_power']/1000.0):6.3f} kW", 5, y_position)
-        y_position += line_height
+        if data is None:
+            self._add_text("Failed to get data...", x_position, y_position, scale=2)
+            y_position += line_height_2
+        else:
+            for v, k in [('PV:', 'P_PV'), ('Netz:', 'P_Grid'), ('Last:', 'P_Load')]:
+                self._add_text(f"{v:<5} {(data[k]/1000.0):6.3f} kW", x_position, y_position, scale=2)
+                y_position += line_height_2
 
-        self._add_text(f"Netz:        {(averages['grid_import']/1000.0):6.3f} kW", 5, y_position)
-        y_position += line_height
+            for v, k in [('Akku:', 'SOC'), ('Autarkie:', 'Autonomy')]:
+                self._add_text(f"{v:<10} {data[k]:3.0f} %", x_position, y_position, scale=1)
+                y_position += line_height_1
 
-        self._add_text(f"Einspeisung: {(averages['grid_export']/1000.0):6.3f} kW", 5, y_position)
-        y_position += line_height
-
-        self._add_text(f"Akku:        {(averages['battery_power']/1000.0):6.3f} kW", 5, y_position)
-        y_position += line_height
-
-        self._add_text(f"Autarkie:     {self_sufficiency:.1f} %", 5, y_position)
-        y_position += line_height
-
-        now = self._ntp.datetime
+        now = ntp.datetime
         now_str = "{:02d}:{:02d}:{:02d}".format(now.tm_hour, now.tm_min, now.tm_sec)
-        self._add_text(now_str, 5, y_position)
-        y_position += line_height
+        self._add_text(now_str, x_position, y_position)
+        y_position += line_height_1
 
-
-        # Simple chart on the right side
-        if load_history:
-            self._draw_simple_chart(load_history, 150, 5, 250-150-5, 122-5)
-
+        # Refresh
         self.display.refresh()
 
-    def _add_text(self, text, x, y, color=0x000000):
+    def _add_text(self, text, x, y, scale=1):
         """Add text label to display"""
-        text_area = label.Label(self.font, text=text, color=color)
+        text_area = label.Label(self.font, text=text, scale=scale, color=0x0)
         text_area.x = x
         text_area.y = y
         text_area.anchored_position = (x, y)
         self.splash.append(text_area)
 
-    def _draw_simple_chart(self, data, x, y, width, height):
-        """Draw a bar chart with one column per data point"""
-        if not data:
-            return
-
-        # Create a bitmap for the chart
-        chart_bitmap = displayio.Bitmap(width, height, 2)
-        chart_palette = displayio.Palette(2)
-        chart_palette[0] = 0xFFFFFF  # White background
-        chart_palette[1] = 0x000000  # Black bars
-
-        # Fill background
-        for i in range(width * height):
-            chart_bitmap[i] = 0
-
-        # Process data: if we have more data points than width, aggregate to cover 24h
-        processed_data = self._process_data_for_chart(data, width)
-
-        # Normalize data
-        max_val = max(processed_data) if max(processed_data) > 0 else 1
-        normalized_heights = [int((val / max_val) * (height - 2)) for val in processed_data]
-
-        # Draw bar chart - one column per data point
-        for i, bar_height in enumerate(normalized_heights):
-            if i < width:  # Ensure we don't exceed bitmap width
-                # Draw bars from bottom up
-                for h in range(bar_height):
-                    y_pos = height - 1 - h
-                    chart_bitmap[y_pos * width + i] = 1
-
-        # Create tile grid for chart
-        chart_sprite = displayio.TileGrid(chart_bitmap, pixel_shader=chart_palette, x=x, y=y)
-        self.splash.append(chart_sprite)
-
-    def _process_data_for_chart(self, data, max_width):
-        """Process data to fit chart width, using maximum values for aggregation"""
-        if len(data) <= max_width:
-            return data
-
-        # Calculate how many data points to aggregate per column
-        points_per_column = len(data) / max_width
-
-        processed_data = []
-        for i in range(max_width):
-            # Determine the range of data points for this column
-            start_idx = int(i * points_per_column)
-            end_idx = int((i + 1) * points_per_column)
-
-            # Get the data slice for this column
-            column_data = data[start_idx:end_idx]
-
-            # Use maximum value for this column (emphasizes peaks)
-            if column_data:
-                processed_data.append(max(column_data))
-            else:
-                processed_data.append(0)
-
-        return processed_data
-
 
 class EnergyMonitor:
     def __init__(self):
         self.api = FroniusAPI(INVERTER_IP)
-        self.display = EPaperDisplay(self.api.ntp)
-        self.data_manager = DataManager(max_hours=24)
+        self.display = EPaperDisplay()
 
-        self.last_data_collection = time.time() - DATA_COLLECTION_INTERVAL
         self.last_gc = time.time()
 
     def run(self):
@@ -233,27 +154,11 @@ class EnergyMonitor:
 
         while True:
             try:
-                print(f"Memory: {gc.mem_free()}b")
-                # Small delay to prevent tight loop
-                time.sleep(1)
-
                 current_time = time.time()
-
-                # Collect data every 15 seconds
-                if current_time - self.last_data_collection >= DATA_COLLECTION_INTERVAL:
-                    self.last_data_collection = current_time
-
-                    print("Collecting data from inverter...")
-                    data = self.api.get_current_data()
-                    if data:
-                        self.data_manager.add_data_point(data)
-                        print(f"Data collected: PV={data['pv_power']:.0f}W, Grid={data['grid_power']:.0f}W, "
-                              f"Battery={data['battery_power']:.0f}W, Load={data['load_power']:.0f}W")
-                    else:
-                        print("Failed to collect data")
+                print(f"Memory: {gc.mem_free()}b")
 
                 # Update display
-                self.display.update(self.data_manager)
+                self.display.update(self.api)
 
                 # Periodic garbage collection
                 if current_time - self.last_gc >= 300:  # Every 5 minutes
