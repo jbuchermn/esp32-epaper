@@ -1,0 +1,43 @@
+{
+  description = "dev env";
+
+  inputs = {
+    utils.url = "github:numtide/flake-utils";
+  };
+
+  outputs =
+    { self
+    , nixpkgs
+    , utils
+    , ...
+    }:
+    utils.lib.eachDefaultSystem (system:
+    let
+      pkgs = import nixpkgs { inherit system; };
+      pythonPackages = pkgs.python3Packages;
+    in
+    {
+      devShells.default = pkgs.mkShell {
+        name = "python-venv";
+        venvDir = "./.venv";
+        buildInputs = with pkgs; [
+          pythonPackages.python
+          pythonPackages.venvShellHook
+
+          minicom
+
+          # other python packages from nix
+        ];
+
+        postVenvCreation = ''
+          unset SOURCE_DATE_EPOCH
+          pip install -r requirements.txt
+        '';
+
+        postShellHook = ''
+          # allow pip to install wheels
+          unset SOURCE_DATE_EPOCH
+        '';
+      };
+    });
+}
