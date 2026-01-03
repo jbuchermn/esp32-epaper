@@ -11,19 +11,15 @@ class FroniusAPI:
     def get_current_data(self):
         """Get current power data from Fronius inverter"""
         try:
-            # Get common inverter data
             url = f"{self.base_url}/GetPowerFlowRealtimeData.fcgi"
-            response = requests.get(url, timeout=10)
 
-            if response.status_code == 200:
-                data = json.loads(response.text)
-                response.close()
-
-                return self._parse_power_flow_data(data)
-            else:
-                print(f"HTTP Error: {response.status_code}")
-                response.close()
-                return None
+            with requests.get(url, timeout=10) as response:
+                if response.status_code == 200:
+                    data = json.loads(response.text)
+                    return self._parse_power_flow_data(data)
+                else:
+                    print(f"HTTP Error: {response.status_code}")
+                    return None
 
         except Exception as e:
             print(f"Error fetching data from inverter: {e}")
@@ -53,15 +49,12 @@ class FroniusAPI:
         """Get basic inverter information"""
         try:
             url = f"{self.base_url}/GetInverterInfo.cgi"
-            response = requests.get(url)
 
-            if response.status_code == 200:
-                data = json.loads(response.text)
-                response.close()
-                return data
-            else:
-                response.close()
-                return None
+            with requests.get(url) as response:
+                if response.status_code == 200:
+                    return json.loads(response.text)
+                else:
+                    return None
 
         except Exception as e:
             print(f"Error getting inverter info: {e}")

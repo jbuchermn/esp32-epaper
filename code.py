@@ -7,10 +7,12 @@ import time
 import gc
 import terminalio
 import time
+
 from adafruit_display_text import label
+from adafruit_bitmap_font import bitmap_font
 from adafruit_ssd1680 import SSD1680
 
-from network import ntp
+from network import now
 from fronius_api import FroniusAPI
 
 # Configuration
@@ -23,6 +25,10 @@ CS = board.IO15
 DC = board.IO27
 RST = board.IO26
 BUSY = board.IO25
+
+# Fonts
+TER_U12N = bitmap_font.load_font("ter-u12n.bdf")
+TER_U18N = bitmap_font.load_font("ter-u18n.bdf")
 
 class EPaperDisplay:
     def __init__(self):
@@ -56,9 +62,6 @@ class EPaperDisplay:
         # Create main display group
         self.splash = displayio.Group()
         self.display.root_group = self.splash
-
-        # Font for text
-        self.font = terminalio.FONT
 
         # Initialize with clear display
         # self.clear()
@@ -100,35 +103,34 @@ class EPaperDisplay:
         # Add text labels
         x_position = 10
         y_position = 10
-        line_height_1 = 14
-        line_height_2 = 24
+        line_height_1 = 16
+        line_height_2 = 20
 
         data = fronius_api.get_current_data()
         data['P_Load'] = (data['P_Grid'] + data['P_Akku'] + data['P_PV'])
 
         if data is None:
-            self._add_text("Failed to get data...", x_position, y_position, scale=2)
+            self._add_text("Failed to get data...", x_position, y_position, font=TER_U18N)
             y_position += line_height_2
         else:
             for v, k in [('PV:', 'P_PV'), ('Netz:', 'P_Grid'), ('Last:', 'P_Load')]:
-                self._add_text(f"{v:<5} {(data[k]/1000.0):6.3f} kW", x_position, y_position, scale=2)
+                self._add_text(f"{v:<5} {(data[k]/1000.0):6.3f} kW", x_position, y_position, font=TER_U18N)
                 y_position += line_height_2
 
             for v, k in [('Akku:', 'SOC'), ('Autarkie:', 'Autonomy')]:
-                self._add_text(f"{v:<10} {data[k]:3.0f} %", x_position, y_position, scale=1)
+                self._add_text(f"{v:<10} {data[k]:3.0f} %", x_position, y_position, font=TER_U12N)
                 y_position += line_height_1
 
-        now = ntp.datetime
-        now_str = "{:02d}:{:02d}:{:02d}".format(now.tm_hour, now.tm_min, now.tm_sec)
-        self._add_text(now_str, x_position, y_position)
+        n = now()
+        self._add_text(str(n), 120, 110, font=TER_U12N)
         y_position += line_height_1
 
         # Refresh
         self.display.refresh()
 
-    def _add_text(self, text, x, y, scale=1):
+    def _add_text(self, text, x, y, font=TER_U12N):
         """Add text label to display"""
-        text_area = label.Label(self.font, text=text, scale=scale, color=0x0)
+        text_area = label.Label(font, text=text, color=0x0)
         text_area.x = x
         text_area.y = y
         text_area.anchored_position = (x, y)
