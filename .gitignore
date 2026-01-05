@@ -2,3 +2,4 @@
 adafruit*
 *.bin
 **/__pycache__
+settings.toml

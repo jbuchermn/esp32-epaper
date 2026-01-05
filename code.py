@@ -1,3 +1,4 @@
+import os
 import board
 import displayio
 import busio
@@ -14,9 +15,7 @@ from adafruit_ssd1680 import SSD1680
 
 from network import now
 from fronius_api import FroniusAPI
-
-# Configuration
-INVERTER_IP = "192.168.99.240"
+from influx_api import InfluxAPI
 
 # Display pins for Waveshare 2.13inch e-ink (SD1680)
 SPI_CLK = board.IO13
@@ -80,9 +79,149 @@ class EPaperDisplay:
 
         self.display.refresh()
 
-    def update(self, fronius_api):
-        """Display power data on e-ink screen"""
+    def update_from_influx(self, influx_api):
+        print(f"Waiting for display update: {self.display.time_to_refresh}s...")
+        time.sleep(self.display.time_to_refresh + 0.1)
+        print("Updating display...")
 
+
+        queries = {
+                'Batt_MAX': """
+from(bucket: "fronius")
+  |> range(start: -24h)
+  |> filter(fn: (r) => r["_measurement"] == "storage")
+  |> filter(fn: (r) => r["_field"] == "StateOfCharge_Relative")
+  |> max()
+            """,
+                'Batt_NOW': """
+from(bucket: "fronius")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r["_measurement"] == "storage")
+  |> filter(fn: (r) => r["_field"] == "StateOfCharge_Relative")
+  |> last()
+            """,
+                'GridImp_YEAR': """
+from(bucket: "home")
+  |> range(start: -1y)
+  |> filter(fn: (r) => r["_measurement"] == "powerflow-calculated")
+  |> keep(columns: ["_time", "_field", "_value"])
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> map(fn: (r) => ({r with _value: r.E_Grid_pos / 1000.0, _field: "Value"}))
+  |> group(columns: ["_field"])
+  |> difference()
+  |> sum()
+            """,
+                'GridImp_DAY': """
+from(bucket: "home")
+  |> range(start: -1d)
+  |> filter(fn: (r) => r["_measurement"] == "powerflow-calculated")
+  |> keep(columns: ["_time", "_field", "_value"])
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> map(fn: (r) => ({r with _value: r.E_Grid_pos / 1000.0, _field: "Value"}))
+  |> group(columns: ["_field"])
+  |> difference()
+  |> sum()
+            """,
+                'GridExp_YEAR': """
+from(bucket: "home")
+  |> range(start: -1y)
+  |> filter(fn: (r) => r["_measurement"] == "powerflow-calculated")
+  |> keep(columns: ["_time", "_field", "_value"])
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> map(fn: (r) => ({r with _value: r.E_Grid_neg / 1000.0, _field: "Value"}))
+  |> group(columns: ["_field"])
+  |> difference()
+  |> sum()
+            """,
+                'GridExp_DAY': """
+from(bucket: "home")
+  |> range(start: -1d)
+  |> filter(fn: (r) => r["_measurement"] == "powerflow-calculated")
+  |> keep(columns: ["_time", "_field", "_value"])
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> map(fn: (r) => ({r with _value: r.E_Grid_neg / 1000.0, _field: "Value"}))
+  |> group(columns: ["_field"])
+  |> difference()
+  |> sum()
+            """,
+                'PV_YEAR': """
+from(bucket: "home")
+  |> range(start: -1y)
+  |> filter(fn: (r) => r["_measurement"] == "powerflow-calculated")
+  |> keep(columns: ["_time", "_field", "_value"])
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> map(fn: (r) => ({r with _value: r.E_PV / 1000.0, _field: "Value"}))
+  |> group(columns: ["_field"])
+  |> difference()
+  |> sum()
+            """,
+                'PV_DAY': """
+from(bucket: "home")
+  |> range(start: -1d)
+  |> filter(fn: (r) => r["_measurement"] == "powerflow-calculated")
+  |> keep(columns: ["_time", "_field", "_value"])
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> map(fn: (r) => ({r with _value: r.E_PV / 1000.0, _field: "Value"}))
+  |> group(columns: ["_field"])
+  |> difference()
+  |> sum()
+            """,
+        }
+
+        vals = {k:influx_api.get_point(v) for k, v in queries.items()}
+
+        # Clear display group
+        self.splash = displayio.Group()
+        self.display.root_group = self.splash
+
+        # Create white background
+        color_bitmap = displayio.Bitmap(250, 122, 1)
+        color_palette = displayio.Palette(1)
+        color_palette[0] = 0xFFFFFF  # White
+        bg_sprite = displayio.TileGrid(color_bitmap, pixel_shader=color_palette)
+        self.splash.append(bg_sprite)
+
+
+        # Layout for 250x122 display
+        # Top: PV values (centered, large font)
+        # Middle left: Grid import (small font)
+        # Middle right: Grid export (small font)
+        # Bottom: Battery bar with current (filled) and max (line)
+
+        # PV values at top right
+        pv_day = vals.get('PV_DAY', 0)
+        pv_year = vals.get('PV_YEAR', 0)
+        self._add_text(f"{pv_day:.0f} kWh", 125, 10, font=TER_U18N, anchor_point=(0.5, 0))
+        self._add_text(f"{pv_year:.0f} kWh", 125, 28, font=TER_U12N, anchor_point=(0.5, 0))
+
+        # Grid import on left
+        imp_day = vals.get('GridImp_DAY', 0)
+        imp_year = vals.get('GridImp_YEAR', 0)
+        self._add_text("Import", 10, 48, font=TER_U12N)
+        self._add_text(f"{imp_day:.0f} kWh", 10, 60, font=TER_U18N)
+        self._add_text(f"{imp_year:.0f} kWh", 10, 78, font=TER_U12N)
+
+        # Grid export on right
+        exp_day = vals.get('GridExp_DAY', 0)
+        exp_year = vals.get('GridExp_YEAR', 0)
+        self._add_text("Export", 240, 48, font=TER_U12N, anchor_point=(1, 0))
+        self._add_text(f"{exp_day:.0f} kWh", 240, 60, font=TER_U18N, anchor_point=(1, 0))
+        self._add_text(f"{exp_year:.0f} kWh", 240, 78, font=TER_U12N, anchor_point=(1, 0))
+
+        # Battery bar at bottom
+        batt_now = vals.get('Batt_NOW', 0)
+        batt_max = vals.get('Batt_MAX', 0)
+        self._draw_battery_bar(125 - 6, 48, batt_now, batt_max, width=12, height=40)
+
+        # Time at bottom center
+        n = now()
+        self._add_text(str(n), 125, 122, font=TER_U12N, anchor_point=(0.5, 1.0))
+
+        # Refresh
+        self.display.refresh()
+
+
+    def update_from_fronius(self, fronius_api):
         print(f"Waiting for display update: {self.display.time_to_refresh}s...")
         time.sleep(self.display.time_to_refresh + 0.1)
         print("Updating display...")
@@ -128,18 +267,69 @@ class EPaperDisplay:
         # Refresh
         self.display.refresh()
 
-    def _add_text(self, text, x, y, font=TER_U12N):
+    def _add_text(self, text, x, y, font=TER_U12N, anchor_point=(0, 0)):
         """Add text label to display"""
-        text_area = label.Label(font, text=text, color=0x0)
+        text_area = label.Label(font, text=text, color=0x0, anchor_point=anchor_point)
         text_area.x = x
         text_area.y = y
         text_area.anchored_position = (x, y)
         self.splash.append(text_area)
 
+    def _draw_battery_bar(self, x, y, current_value, max_value, width=10, height=40):
+        """Draw vertical battery bar with black outline and filled current value"""
+        # Ensure current value is within bounds
+        current_value = max(0, min(100, current_value))
+
+        # Create battery outline (black border)
+        outline_bitmap = displayio.Bitmap(width, height, 1)
+        outline_palette = displayio.Palette(2)
+        outline_palette[0] = 0xFFFFFF  # White (transparent)
+        outline_palette[1] = 0x000000  # Black border
+
+        # Draw border pixels (top, bottom, left, right)
+        for i in range(width):
+            outline_bitmap[i, 0] = 1  # Top border
+            outline_bitmap[i, height-1] = 1  # Bottom border
+        for i in range(height):
+            outline_bitmap[0, i] = 1  # Left border
+            outline_bitmap[width-1, i] = 1  # Right border
+
+        outline_sprite = displayio.TileGrid(outline_bitmap, pixel_shader=outline_palette, x=x, y=y)
+        self.splash.append(outline_sprite)
+
+        # Draw filled portion for current value
+        if current_value > 0:
+            fill_height = int((current_value / 100.0) * (height - 2))  # Leave space for borders
+            fill_height = max(0, min(fill_height, height - 2))
+
+            if fill_height > 0:
+                fill_bitmap = displayio.Bitmap(width - 2, fill_height, 1)
+                fill_palette = displayio.Palette(1)
+                fill_palette[0] = 0x000000  # Black fill
+
+                # Position fill from bottom up
+                fill_y = y + height - 1 - fill_height
+                fill_sprite = displayio.TileGrid(fill_bitmap, pixel_shader=fill_palette, x=x + 1, y=fill_y)
+                self.splash.append(fill_sprite)
+
+
+        # Draw max line
+        max_bitmap = displayio.Bitmap(width + 2, 1, 1)
+        max_palette = displayio.Palette(1)
+        max_palette[0] = 0x000000  # Black fill
+        max_y = y + height - 1 - int((max_value / 100.0) * (height - 2))
+        max_sprite = displayio.TileGrid(max_bitmap, pixel_shader=max_palette, x=x - 1, y=max_y)
+        self.splash.append(max_sprite)
+
 
 class EnergyMonitor:
     def __init__(self):
-        self.api = FroniusAPI(INVERTER_IP)
+        self.fronius_api = FroniusAPI(os.getenv("INVERTER_IP"))
+        self.influx_api = InfluxAPI(
+            os.getenv("INFLUX_URL"),
+            os.getenv("INFLUX_ORG"),
+            os.getenv("INFLUX_TOKEN")
+        )
         self.display = EPaperDisplay()
 
         self.last_gc = time.time()
@@ -149,8 +339,8 @@ class EnergyMonitor:
         print("Starting Energy Monitor...")
 
         # Test connection to inverter
-        if not self.api.test_connection():
-            print("Warning: Could not connect to inverter. Check IP address and network.")
+        # if not self.fronius_api.test_connection():
+        #     print("Warning: Could not connect to inverter. Check IP address and network.")
 
         print("Energy Monitor running...")
 
@@ -160,7 +350,8 @@ class EnergyMonitor:
                 print(f"Memory: {gc.mem_free()}b")
 
                 # Update display
-                self.display.update(self.api)
+                self.display.update_from_influx(self.influx_api)
+                # self.display.update_from_fronius(self.fronius_api)
 
                 # Periodic garbage collection
                 if current_time - self.last_gc >= 300:  # Every 5 minutes
