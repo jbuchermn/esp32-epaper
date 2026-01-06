@@ -7,11 +7,13 @@ except:
     from adafruit_ntp import NTP
     from adafruit_datetime import datetime, timedelta, timezone
 
+    print("Setting up adafruit_requests...")
     _pool = adafruit_connection_manager.get_radio_socketpool(wifi.radio)
     _ssl_context = adafruit_connection_manager.get_radio_ssl_context(wifi.radio)
 
     requests = adafruit_requests.Session(_pool, _ssl_context)
 
+    print("Setting up NTP...")
     _ntp = NTP(_pool, cache_seconds=3600)
 
     # CEST / CET

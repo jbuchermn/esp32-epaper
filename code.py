@@ -79,19 +79,15 @@ class EPaperDisplay:
 
         self.display.refresh()
 
-    def update_from_influx(self, influx_api):
-        print(f"Waiting for display update: {self.display.time_to_refresh}s...")
-        time.sleep(self.display.time_to_refresh + 0.1)
-        print("Updating display...")
-
-
+    def _query_influx(self, influx_api):
         queries = {
                 'Batt_MAX': """
 from(bucket: "fronius")
-  |> range(start: -24h)
+  |> range(start: -7d)
   |> filter(fn: (r) => r["_measurement"] == "storage")
   |> filter(fn: (r) => r["_field"] == "StateOfCharge_Relative")
-  |> max()
+  |> aggregateWindow(every: 1d, fn: max, createEmpty: false)
+  |> mean()
             """,
                 'Batt_NOW': """
 from(bucket: "fronius")
@@ -166,9 +162,38 @@ from(bucket: "home")
   |> difference()
   |> sum()
             """,
+                'Load_YEAR': """
+from(bucket: "home")
+  |> range(start: -1y)
+  |> filter(fn: (r) => r["_measurement"] == "powerflow-calculated")
+  |> keep(columns: ["_time", "_field", "_value"])
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> map(fn: (r) => ({r with _value: r.E_Load / 1000.0, _field: "Value"}))
+  |> group(columns: ["_field"])
+  |> difference()
+  |> sum()
+            """,
+                'PV_15MIN': """
+from(bucket: "fronius")
+  |> range(start: -15m)
+  |> filter(fn: (r) => r["_measurement"] == "powerflow")
+  |> filter(fn: (r) => r["_field"] == "P_PV")
+  |> mean()
+            """,
         }
 
-        vals = {k:influx_api.get_point(v) for k, v in queries.items()}
+        return {k:influx_api.get_point(v) for k, v in queries.items()}
+
+
+    def update_from_influx(self, influx_api):
+        print(f"Waiting for display update: {self.display.time_to_refresh}s...")
+        time.sleep(self.display.time_to_refresh + 0.1)
+
+        print("Querying...")
+        # TODO: On the second iteration, this breaks (-2, Name or service not known) after a long wait
+        vals = self._query_influx(influx_api)
+
+        print("Updating display...")
 
         # Clear display group
         self.splash = displayio.Group()
@@ -181,41 +206,49 @@ from(bucket: "home")
         bg_sprite = displayio.TileGrid(color_bitmap, pixel_shader=color_palette)
         self.splash.append(bg_sprite)
 
+        # PV values top left
+        pv_now = vals.get('PV_15MIN', 0)
+        self._add_text(f"PV: {pv_now:.0f} W", 10, 10, font=TER_U12N, anchor_point=(0, 0))
 
-        # Layout for 250x122 display
-        # Top: PV values (centered, large font)
-        # Middle left: Grid import (small font)
-        # Middle right: Grid export (small font)
-        # Bottom: Battery bar with current (filled) and max (line)
+        # Autonomy top right
+        autonomy = 100. * (1. + vals.get('GridImp_YEAR', 0) / vals.get('Load_YEAR', 1))
+        self._add_text(f"Aut.: {autonomy:.0f}%", 240, 10, font=TER_U12N, anchor_point=(1.0, 0))
 
-        # PV values at top right
+        # PV values top
         pv_day = vals.get('PV_DAY', 0)
         pv_year = vals.get('PV_YEAR', 0)
-        self._add_text(f"{pv_day:.0f} kWh", 125, 10, font=TER_U18N, anchor_point=(0.5, 0))
-        self._add_text(f"{pv_year:.0f} kWh", 125, 28, font=TER_U12N, anchor_point=(0.5, 0))
+        self._add_text("PV", 125, 3, font=TER_U12N, anchor_point=(0.5, 0))
+        self._add_text(f"{pv_day:.0f}", 122, 15, font=TER_U18N, anchor_point=(1, 0))
+        self._add_text(f"{pv_year:.0f}", 122, 33, font=TER_U12N, anchor_point=(1, 0))
+        self._add_text(f"kWh", 128, 31, font=TER_U18N, anchor_point=(0, 0.5))
 
         # Grid import on left
         imp_day = vals.get('GridImp_DAY', 0)
         imp_year = vals.get('GridImp_YEAR', 0)
         self._add_text("Import", 10, 48, font=TER_U12N)
-        self._add_text(f"{imp_day:.0f} kWh", 10, 60, font=TER_U18N)
-        self._add_text(f"{imp_year:.0f} kWh", 10, 78, font=TER_U12N)
+        self._add_text(f"{imp_day:.0f}", 40, 60, font=TER_U18N, anchor_point=(1, 0))
+        self._add_text(f"{imp_year:.0f}", 40, 78, font=TER_U12N, anchor_point=(1, 0))
+        self._add_text(f"kWh", 46, 76, font=TER_U18N, anchor_point=(0, 0.5))
 
         # Grid export on right
         exp_day = vals.get('GridExp_DAY', 0)
         exp_year = vals.get('GridExp_YEAR', 0)
         self._add_text("Export", 240, 48, font=TER_U12N, anchor_point=(1, 0))
-        self._add_text(f"{exp_day:.0f} kWh", 240, 60, font=TER_U18N, anchor_point=(1, 0))
-        self._add_text(f"{exp_year:.0f} kWh", 240, 78, font=TER_U12N, anchor_point=(1, 0))
+        self._add_text(f"{exp_day:.0f}", 210, 60, font=TER_U18N, anchor_point=(1, 0))
+        self._add_text(f"{exp_year:.0f}", 210, 78, font=TER_U12N, anchor_point=(1, 0))
+        self._add_text(f"kWh", 216, 76, font=TER_U18N, anchor_point=(0, 0.5))
 
         # Battery bar at bottom
         batt_now = vals.get('Batt_NOW', 0)
         batt_max = vals.get('Batt_MAX', 0)
-        self._draw_battery_bar(125 - 6, 48, batt_now, batt_max, width=12, height=40)
+        self._draw_battery_bar(125 - 6, 54, batt_now, batt_max, width=12, height=40)
 
         # Time at bottom center
-        n = now()
-        self._add_text(str(n), 125, 122, font=TER_U12N, anchor_point=(0.5, 1.0))
+        try:
+            n = now()
+            self._add_text(f"{n.day:02}.{n.month:02}.{n.year} {n.hour:02}:{n.minute:02}", 125, 122, font=TER_U12N, anchor_point=(0.5, 1.0))
+        except:
+            self._add_text(f"Offline", 125, 122, font=TER_U12N, anchor_point=(0.5, 1.0))
 
         # Refresh
         self.display.refresh()
@@ -226,7 +259,6 @@ from(bucket: "home")
         time.sleep(self.display.time_to_refresh + 0.1)
         print("Updating display...")
 
-
         # Clear display group
         self.splash = displayio.Group()
         self.display.root_group = self.splash
@@ -237,7 +269,6 @@ from(bucket: "home")
         color_palette[0] = 0xFFFFFF  # White
         bg_sprite = displayio.TileGrid(color_bitmap, pixel_shader=color_palette)
         self.splash.append(bg_sprite)
-
 
         # Add text labels
         x_position = 10
@@ -335,29 +366,32 @@ class EnergyMonitor:
         self.last_gc = time.time()
 
     def run(self):
-        """Main application loop"""
-        print("Starting Energy Monitor...")
-
         # Test connection to inverter
         # if not self.fronius_api.test_connection():
         #     print("Warning: Could not connect to inverter. Check IP address and network.")
 
-        print("Energy Monitor running...")
+        print("Main loop...")
 
         while True:
             try:
-                current_time = time.time()
-                print(f"Memory: {gc.mem_free()}b")
-
-                # Update display
-                self.display.update_from_influx(self.influx_api)
-                # self.display.update_from_fronius(self.fronius_api)
+                # Prevent tight loop
+                time.sleep(1)
 
                 # Periodic garbage collection
+                current_time = time.time()
                 if current_time - self.last_gc >= 300:  # Every 5 minutes
                     self.last_gc = current_time
                     print("Collecting garbage...")
                     gc.collect()
+                    print(f"Memory: {gc.mem_free()}b")
+
+                # print("Collecting garbage...")
+                # gc.collect()
+                # print(f"Memory: {gc.mem_free()}b")
+
+                # Update display
+                self.display.update_from_influx(self.influx_api)
+                # self.display.update_from_fronius(self.fronius_api)
 
             except KeyboardInterrupt:
                 print("Shutting down...")

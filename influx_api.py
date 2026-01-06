@@ -7,35 +7,38 @@ class InfluxAPI:
         self._token = token
 
     def get_point(self, query):
-        headers = {
-            'Authorization': f'Token {self._token}',
-            'Content-Type': 'application/vnd.flux'
-        }
-        with requests.post(
-            f'{self._url}/api/v2/query?org={self._org}',
-            headers=headers,
-            data=query
-            ) as response:
+        try:
+            headers = {
+                'Authorization': f'Token {self._token}',
+                'Content-Type': 'application/vnd.flux'
+            }
+            with requests.post(
+                f'{self._url}/api/v2/query?org={self._org}',
+                headers=headers,
+                data=query
+                ) as response:
 
-            # print(response.text)
+                # print(response.text)
 
-            if response.status_code not in [200, 201, 202]:
-                print(response.text)
+                if response.status_code not in [200, 201, 202]:
+                    print(response.text)
+                    return None
+
+                lines = response.text.strip().split('\n')
+
+                col=None
+                for line in lines:
+                    parts = [l.strip() for l in line.split(',')]
+                    if col is None and '_value' in parts:
+                        col = parts.index('_value')
+                    elif col is not None and len(parts) > col:
+                        try:
+                            return float(parts[col])
+                        except (ValueError, IndexError):
+                            continue
                 return None
-
-            data = response.text
-            lines = data.strip().split('\n')
-
-            col=None
-            for line in lines:
-                parts = [l.strip() for l in line.split(',')]
-                if col is None and '_value' in parts:
-                    col = parts.index('_value')
-                elif col is not None and len(parts) > col:
-                    try:
-                        return float(parts[col])
-                    except (ValueError, IndexError):
-                        continue
+        except Exception as e:
+            print(f"Error querying influx: {e}")
             return None
 
 if __name__ == '__main__':
