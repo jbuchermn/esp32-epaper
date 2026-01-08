@@ -8,6 +8,8 @@ import time
 import gc
 import terminalio
 import time
+import wifi
+import microcontroller
 
 from adafruit_display_text import label
 from adafruit_bitmap_font import bitmap_font
@@ -26,7 +28,8 @@ RST = board.IO26
 BUSY = board.IO25
 
 # Fonts
-TER_U12N = bitmap_font.load_font("ter-u12n.bdf")
+# TER_U12N = bitmap_font.load_font("ter-u12n.bdf")
+TER_U12N = terminalio.FONT
 TER_U18N = bitmap_font.load_font("ter-u18n.bdf")
 
 class EPaperDisplay:
@@ -182,7 +185,53 @@ from(bucket: "fronius")
             """,
         }
 
-        return {k:influx_api.get_point(v) for k, v in queries.items()}
+        vals = {k:influx_api.get_point(v) for k, v in queries.items()}
+        return vals
+
+    def update_from_fronius(self, fronius_api):
+        print(f"Waiting for display update: {self.display.time_to_refresh}s...")
+        time.sleep(self.display.time_to_refresh + 0.1)
+        print("Updating display...")
+
+        # Clear display group
+        self.splash = displayio.Group()
+        self.display.root_group = self.splash
+
+        # Create white background
+        color_bitmap = displayio.Bitmap(250, 122, 1)
+        color_palette = displayio.Palette(1)
+        color_palette[0] = 0xFFFFFF  # White
+        bg_sprite = displayio.TileGrid(color_bitmap, pixel_shader=color_palette)
+        self.splash.append(bg_sprite)
+
+        # Add text labels
+        x_position = 10
+        y_position = 10
+        line_height_1 = 16
+        line_height_2 = 20
+
+        data = fronius_api.get_current_data()
+        data['P_Load'] = (data['P_Grid'] + data['P_Akku'] + data['P_PV'])
+
+        if data is None:
+            self._add_text("Failed to get data...", x_position, y_position, font=TER_U18N)
+            y_position += line_height_2
+        else:
+            for v, k in [('PV:', 'P_PV'), ('Netz:', 'P_Grid'), ('Last:', 'P_Load')]:
+                self._add_text(f"{v:<5} {(data[k]/1000.0):6.3f} kW", x_position, y_position, font=TER_U18N)
+                y_position += line_height_2
+
+            for v, k in [('Akku:', 'SOC'), ('Autarkie:', 'Autonomy')]:
+                self._add_text(f"{v:<10} {data[k]:3.0f} %", x_position, y_position, font=TER_U12N)
+                y_position += line_height_1
+
+        n = now()
+        self._add_text(str(n), 120, 110, font=TER_U12N)
+        y_position += line_height_1
+
+        # Refresh
+        self.display.refresh()
+
 
 
     def update_from_influx(self, influx_api):
@@ -190,7 +239,6 @@ from(bucket: "fronius")
         time.sleep(self.display.time_to_refresh + 0.1)
 
         print("Querying...")
-        # TODO: On the second iteration, this breaks (-2, Name or service not known) after a long wait
         vals = self._query_influx(influx_api)
 
         print("Updating display...")
@@ -253,50 +301,9 @@ from(bucket: "fronius")
         # Refresh
         self.display.refresh()
 
-
-    def update_from_fronius(self, fronius_api):
-        print(f"Waiting for display update: {self.display.time_to_refresh}s...")
-        time.sleep(self.display.time_to_refresh + 0.1)
-        print("Updating display...")
-
-        # Clear display group
+        # GC
         self.splash = displayio.Group()
         self.display.root_group = self.splash
-
-        # Create white background
-        color_bitmap = displayio.Bitmap(250, 122, 1)
-        color_palette = displayio.Palette(1)
-        color_palette[0] = 0xFFFFFF  # White
-        bg_sprite = displayio.TileGrid(color_bitmap, pixel_shader=color_palette)
-        self.splash.append(bg_sprite)
-
-        # Add text labels
-        x_position = 10
-        y_position = 10
-        line_height_1 = 16
-        line_height_2 = 20
-
-        data = fronius_api.get_current_data()
-        data['P_Load'] = (data['P_Grid'] + data['P_Akku'] + data['P_PV'])
-
-        if data is None:
-            self._add_text("Failed to get data...", x_position, y_position, font=TER_U18N)
-            y_position += line_height_2
-        else:
-            for v, k in [('PV:', 'P_PV'), ('Netz:', 'P_Grid'), ('Last:', 'P_Load')]:
-                self._add_text(f"{v:<5} {(data[k]/1000.0):6.3f} kW", x_position, y_position, font=TER_U18N)
-                y_position += line_height_2
-
-            for v, k in [('Akku:', 'SOC'), ('Autarkie:', 'Autonomy')]:
-                self._add_text(f"{v:<10} {data[k]:3.0f} %", x_position, y_position, font=TER_U12N)
-                y_position += line_height_1
-
-        n = now()
-        self._add_text(str(n), 120, 110, font=TER_U12N)
-        y_position += line_height_1
-
-        # Refresh
-        self.display.refresh()
 
     def _add_text(self, text, x, y, font=TER_U12N, anchor_point=(0, 0)):
         """Add text label to display"""
@@ -363,8 +370,6 @@ class EnergyMonitor:
         )
         self.display = EPaperDisplay()
 
-        self.last_gc = time.time()
-
     def run(self):
         # Test connection to inverter
         # if not self.fronius_api.test_connection():
@@ -377,17 +382,10 @@ class EnergyMonitor:
                 # Prevent tight loop
                 time.sleep(1)
 
-                # Periodic garbage collection
-                current_time = time.time()
-                if current_time - self.last_gc >= 300:  # Every 5 minutes
-                    self.last_gc = current_time
-                    print("Collecting garbage...")
-                    gc.collect()
-                    print(f"Memory: {gc.mem_free()}b")
-
-                # print("Collecting garbage...")
-                # gc.collect()
-                # print(f"Memory: {gc.mem_free()}b")
+                # GC
+                print("Collecting garbage...")
+                gc.collect()
+                print(f"Memory: {gc.mem_free()}b")
 
                 # Update display
                 self.display.update_from_influx(self.influx_api)
@@ -398,7 +396,8 @@ class EnergyMonitor:
                 break
             except Exception as e:
                 print(f"Error in main loop: {e}")
-                time.sleep(5)  # Wait before retrying
+                time.sleep(5)
+                microcontroller.reset()
 
 if __name__ == "__main__":
     monitor = EnergyMonitor()

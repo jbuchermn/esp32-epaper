@@ -1,4 +1,7 @@
+import gc
 from network import requests
+
+from adafruit_connection_manager import connection_manager_close_all
 
 class InfluxAPI:
     def __init__(self, url, org, token):
@@ -7,38 +10,39 @@ class InfluxAPI:
         self._token = token
 
     def get_point(self, query):
-        try:
-            headers = {
-                'Authorization': f'Token {self._token}',
-                'Content-Type': 'application/vnd.flux'
-            }
-            with requests.post(
-                f'{self._url}/api/v2/query?org={self._org}',
-                headers=headers,
-                data=query
-                ) as response:
+        # Preparation in order for the ESP32 to be capable of a simple POST
+        gc.collect()
+        connection_manager_close_all()
 
-                # print(response.text)
+        headers = {
+            'Authorization': f'Token {self._token}',
+            'Content-Type': 'application/vnd.flux'
+        }
+        with requests.post(
+            f'{self._url}/api/v2/query?org={self._org}',
+            headers=headers,
+            data=query,
+            timeout=10
+            ) as response:
 
-                if response.status_code not in [200, 201, 202]:
-                    print(response.text)
-                    return None
+            # print(response.text)
 
-                lines = response.text.strip().split('\n')
-
-                col=None
-                for line in lines:
-                    parts = [l.strip() for l in line.split(',')]
-                    if col is None and '_value' in parts:
-                        col = parts.index('_value')
-                    elif col is not None and len(parts) > col:
-                        try:
-                            return float(parts[col])
-                        except (ValueError, IndexError):
-                            continue
+            if response.status_code not in [200, 201, 202]:
+                print(response.text)
                 return None
-        except Exception as e:
-            print(f"Error querying influx: {e}")
+
+            lines = response.text.strip().split('\n')
+
+            col=None
+            for line in lines:
+                parts = [l.strip() for l in line.split(',')]
+                if col is None and '_value' in parts:
+                    col = parts.index('_value')
+                elif col is not None and len(parts) > col:
+                    try:
+                        return float(parts[col])
+                    except (ValueError, IndexError):
+                        continue
             return None
 
 if __name__ == '__main__':
